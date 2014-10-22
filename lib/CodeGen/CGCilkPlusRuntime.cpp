@@ -92,6 +92,18 @@ typedef void (__cilkrts_cilk_for_64)(__cilk_abi_f64_t body, void *data,
 
 typedef void (cilk_func)(__cilkrts_stack_frame *);
 
+typedef void (cilk_enter_begin)(__cilkrts_stack_frame *, void *);
+typedef void (cilk_enter_helper_begin)(__cilkrts_stack_frame *, void *);
+typedef void (cilk_enter_end)(__cilkrts_stack_frame *);
+typedef void (cilk_detach_begin)(__cilkrts_stack_frame *);
+typedef void (cilk_detach_end)();
+typedef void (cilk_spawn_prepare)(__cilkrts_stack_frame *);
+typedef void (cilk_spawn_or_continue)(int);
+typedef void (cilk_sync_begin)(__cilkrts_stack_frame *);
+typedef void (cilk_sync_end)(__cilkrts_stack_frame *);
+typedef void (cilk_leave_begin)(__cilkrts_stack_frame *);
+typedef void (cilk_leave_end)();
+
 } // namespace
 
 #define CILKRTS_FUNC(name, CGF) Get__cilkrts_##name(CGF)
@@ -108,6 +120,34 @@ DEFAULT_GET_CILKRTS_FUNC(rethrow)
 DEFAULT_GET_CILKRTS_FUNC(leave_frame)
 DEFAULT_GET_CILKRTS_FUNC(get_tls_worker)
 DEFAULT_GET_CILKRTS_FUNC(bind_thread_1)
+
+#define CILK_OK_FUNC(name, CGF) Get_cilk_##name(CGF)
+
+#define GET_CILK_OK_FUNC(name) \
+static llvm::Function *Get_cilk_##name(clang::CodeGen::CodeGenFunction &CGF) { \
+   return llvm::cast<llvm::Function>(CGF.CGM.CreateRuntimeFunction( \
+      llvm::TypeBuilder<cilk_##name, false>::get(CGF.getLLVMContext()), \
+      "cilk_"#name)); \
+}
+
+#define GET_CILK_OK_FUNC2(name) \
+static llvm::Function *Get_cilk_##name(clang::CodeGen::CodeGenModule &CGM) { \
+   return llvm::cast<llvm::Function>(CGM.CreateRuntimeFunction( \
+      llvm::TypeBuilder<cilk_##name, false>::get(CGM.getLLVMContext()), \
+      "cilk_"#name)); \
+}
+
+GET_CILK_OK_FUNC(enter_begin)
+GET_CILK_OK_FUNC(enter_helper_begin)
+GET_CILK_OK_FUNC(enter_end)
+GET_CILK_OK_FUNC(detach_begin)
+GET_CILK_OK_FUNC(detach_end)
+GET_CILK_OK_FUNC2(spawn_prepare)
+GET_CILK_OK_FUNC2(spawn_or_continue)
+GET_CILK_OK_FUNC(sync_begin)
+GET_CILK_OK_FUNC(sync_end)
+GET_CILK_OK_FUNC(leave_begin)
+GET_CILK_OK_FUNC(leave_end)
 
 typedef std::map<llvm::LLVMContext*, llvm::StructType*> TypeBuilderCache;
 
@@ -639,6 +679,9 @@ static Function *GetCilkSyncFn(CodeGenFunction &CGF) {
   {
     CGBuilderTy B(Entry);
 
+    // cilk_sync_begin
+    B.CreateCall(CILK_OK_FUNC(sync_begin, CGF), SF);
+
     // if (sf->flags & CILK_FRAME_UNSYNCHED)
     Value *Flags = LoadField(B, SF, StackFrameBuilder::flags);
     Flags = B.CreateAnd(Flags,
@@ -709,6 +752,9 @@ static Function *GetCilkSyncFn(CodeGenFunction &CGF) {
                   ConstantInt::get(Rank->getType()->getPointerElementType(),
                                    1)),
                   Rank);
+
+    // cilk_sync_end
+    B.CreateCall(CILK_OK_FUNC(sync_end, CGF), SF);
     B.CreateRetVoid();
   }
 
@@ -907,9 +953,15 @@ static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
 
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
+  // cilk_enter_begin
+  Value* args[2] = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+		  B.getInt32(0))};
+  B.CreateCall(CILK_OK_FUNC(enter_begin, CGF), ArrayRef<Value *>(args));
 
   // __cilkrts_enter_frame_1(sf)
   B.CreateCall(CILKRTS_FUNC(enter_frame_1, CGF), SF);
+  // cilk_enter_end
+  B.CreateCall(CILK_OK_FUNC(enter_end, CGF), SF);
 
   B.CreateRetVoid();
 
@@ -945,6 +997,9 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
   {
     CGBuilderTy B(Entry);
 
+    // cilk_leave_begin
+    B.CreateCall(CILK_OK_FUNC(leave_begin, CGF), SF);
+
     // __cilkrts_pop_frame(sf)
     B.CreateCall(CILKRTS_FUNC(pop_frame, CGF), SF);
 
@@ -967,6 +1022,8 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
   // Exit
   {
     CGBuilderTy B(Exit);
+    // cilk_leave_end
+    B.CreateCall(CILK_OK_FUNC(leave_end, CGF));
     B.CreateRetVoid();
   }
 
@@ -996,11 +1053,21 @@ static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
 
+  // cilk_enter_helper_begin
+  Value* args[2] = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+		  B.getInt32(0))};
+  B.CreateCall(CILK_OK_FUNC(enter_helper_begin, CGF), ArrayRef<Value *>(args));
   // __cilkrts_enter_frame_fast_1(sf);
   B.CreateCall(CILKRTS_FUNC(enter_frame_fast_1, CGF), SF);
+  // cilk_enter_end
+  B.CreateCall(CILK_OK_FUNC(enter_end, CGF), SF);
 
+  // cilk_detach_begin
+  B.CreateCall(CILK_OK_FUNC(detach_begin, CGF), SF);
   // __cilkrts_detach(sf);
   B.CreateCall(CILKRTS_FUNC(detach, CGF), SF);
+  // cilk_detach_end
+  B.CreateCall(CILK_OK_FUNC(detach_end, CGF));
 
   B.CreateRetVoid();
 
@@ -1036,6 +1103,8 @@ static llvm::Function *GetCilkHelperEpilogue(CodeGenFunction &CGF) {
   // Entry
   {
     CGBuilderTy B(Entry);
+    // cilk_leave_begin
+    B.CreateCall(CILK_OK_FUNC(leave_begin, CGF), SF);
 
     // if (sf->worker)
     Value *C = B.CreateIsNotNull(LoadField(B, SF, StackFrameBuilder::worker));
@@ -1058,6 +1127,8 @@ static llvm::Function *GetCilkHelperEpilogue(CodeGenFunction &CGF) {
   // Exit
   {
     CGBuilderTy B(Exit);
+    // cilk_leave_end
+    B.CreateCall(CILK_OK_FUNC(leave_end, CGF));
     B.CreateRetVoid();
   }
 
@@ -1157,11 +1228,15 @@ void CodeGenFunction::EmitCilkSpawnDecl(const CilkSpawnDecl *D) {
 
   BasicBlock *Entry = createBasicBlock("cilk.spawn.savestate"),
              *Body  = createBasicBlock("cilk.spawn.helpercall"),
-             *Exit  = createBasicBlock("cilk.spawn.continuation");
+             *Exit  = createBasicBlock("cilk.spawn.continuation"),
+             *PostExit = createBasicBlock("cilk.spawn.postcontinuation");
 
   EmitBlock(Entry);
   {
     CGBuilderTy B(Entry);
+
+    // cilk_spawn_prepare
+    B.CreateCall(CILK_OK_FUNC(spawn_prepare, CGM), SF);
 
     // Need to save state before spawning
     Value *C = EmitCilkSetJmp(B, SF, *this);
@@ -1171,6 +1246,7 @@ void CodeGenFunction::EmitCilkSpawnDecl(const CilkSpawnDecl *D) {
 
   EmitBlock(Body);
   {
+	CGBuilderTy B(Body);
     // If this spawn initializes a variable, alloc this variable and
     // set it as the current receiver.
     VarDecl *VD = D->getReceiverDecl();
@@ -1186,6 +1262,9 @@ void CodeGenFunction::EmitCilkSpawnDecl(const CilkSpawnDecl *D) {
       }
     }
 
+    // cilk_spawn_or_continue
+    B.CreateCall(CILK_OK_FUNC(spawn_or_continue, CGM), B.getInt32(0));
+
     // Emit call to the helper function
     Function *Helper = EmitSpawnCapturedStmt(*D->getCapturedStmt(), VD);
 
@@ -1194,8 +1273,15 @@ void CodeGenFunction::EmitCilkSpawnDecl(const CilkSpawnDecl *D) {
 
     // Set other attributes.
     setHelperAttributes(*this, D->getSpawnStmt(), Helper);
+    B.CreateBr(PostExit);
   }
   EmitBlock(Exit);
+  {
+    CGBuilderTy B(Exit);
+    // cilk_spawn_or_continue
+    B.CreateCall(CILK_OK_FUNC(spawn_or_continue, CGM), B.getInt32(1));
+  }
+  EmitBlock(PostExit);
 }
 
 void CodeGenFunction::EmitCilkSpawnExpr(const CilkSpawnExpr *E) {
