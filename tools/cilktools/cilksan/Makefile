@@ -24,11 +24,8 @@ default: libcilksan.so
 # called name.d from a C source file called name.c.
 %.d : %.c
 	@set -e; rm -f $@; \
-	$(CC) -MM $(CFLAGS) $< > $@.$$$$; \
-	sed -e 's|.$(*F).o:|$*.o:|' < $@.$$$$ > $@.$$$$; \
-	sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ >> $@; \
-	sed -e 's/.*://' -e 's/\\$$//' < $@.$$$$ | fmt -1 | \
-	sed -e 's/^ *//' -e 's/$$/:/' >> $@; \
+	$(CC) -MM -MP -MF $@.$$$$ $(CFLAGS) $< ; \
+	sed -e 's|\($*\)\.o[ :]*|\1.o $@ : |g' < $@.$$$$ > $@; \
 	rm -f $@.$$$$
 
 
@@ -36,11 +33,8 @@ default: libcilksan.so
 # called name.d from a CPP source file called name.cpp.
 %.d : %.cpp
 	@set -e; rm -f $@; \
-	$(CXX) -MM $(CXXFLAGS) $< > $@.$$$$; \
-	sed -e 's|.$(*F):|$*.o:|' < $@.$$$$ > $@.$$$$; \
-	sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
-	sed -e 's/.*://' -e 's/\\$$//' < $@.$$$$ | fmt -1 | \
-	sed -e 's/^ *//' -e 's/$$/:/' >> $@; \
+	$(CXX) -MM -MP -MF $@.$$$$ $(CXXFLAGS) $< ; \
+	sed -e 's|\($*\)\.o[ :]*|\1.o $@ : |g' < $@.$$$$ > $@ ; \
 	rm -f $@.$$$$
 
 # mem_access.o: debug_util.h mem_access.h
