@@ -1,1 +1,0 @@
-clang -o test2 -I/home/neboat/compilers/llvm-cilkok-src/tools/clang/tools/cilktools/cilksan -L/home/neboat/compilers/llvm-cilkok-src/tools/clang/tools/cilktools/cilksan test2.c -fcilkplus -fsanitize=thread -g -ldl -lcilksan
