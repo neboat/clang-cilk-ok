@@ -1,4 +1,5 @@
 #include <cstring>
+#include <iostream>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -90,7 +91,7 @@ void delete_proc_maps() {
     }
 }
 
-void get_info_on_inst_addr(uint64_t addr, int *line_no, std::string *file) {
+static void get_info_on_inst_addr(uint64_t addr, int *line_no, std::string *file) {
 
     for (unsigned int i=0; i < proc_maps->size(); i++) {
         if ((*proc_maps)[i].low <= addr && addr < (*proc_maps)[i].high) {
@@ -143,6 +144,8 @@ get_info_on_mem_access(uint64_t inst_addr
   return convert.str();
 }
 
+extern void print_current_function_info();
+
 static void print_race_info(const RaceInfo_t& race) {
   
   std::cerr << "Race detected at address " 
@@ -168,6 +171,8 @@ static void print_race_info(const RaceInfo_t& race) {
       break;
   }
   std::cerr << std::endl;
+
+  print_current_function_info();
 }
 
 // Log the race detected
@@ -177,7 +182,7 @@ void report_race(uint64_t first_inst, uint64_t second_inst,
   bool found = false;
   uint64_t key = first_inst < second_inst ? first_inst : second_inst;
   RaceInfo_t race(first_inst, second_inst, addr, race_type);
-
+    
   std::pair<RaceMap_t::iterator, RaceMap_t::iterator> range;
   range = races_found.equal_range(key);
   while(range.first != range.second) {

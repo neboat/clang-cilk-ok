@@ -31,21 +31,17 @@ void debug_printf(int level, const char *fmt, ...) {
 
 // Print out the error message and exit
 __attribute__((noreturn))
-void die(int exit_code, const char *fmt, ...) {
+void die(const char *fmt, ...) {
 
     std::va_list l;
     std::fprintf(stderr, "=================================================\n");
-    if(exit_code == ERR_EXIT_CODE) {
-        std::fprintf(stderr, "racedetector: fatal error\n");
-    } else {
-        std::fprintf(stderr, "racedetector: race found\n");
-    }
+    std::fprintf(stderr, "racedetector: fatal error\n");
 
     va_start(l, fmt);
     std::vfprintf(stderr, fmt, l);
     std::fprintf(stderr, "=================================================\n");
     fflush(stderr);
     va_end(l);
-    std::exit(exit_code);
+    std::exit(1);
 }
 

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <inttypes.h>
 
+#include "cilksan_internal.h"
 #include "debug_util.h"
 #include "disjointset.h"
 #include "spbag.h"
@@ -29,17 +30,6 @@ static const int gtype_to_mem_size[4] = { 1, 2, 4, 8 };
 #define IS_ALIGNED_WITH_GTYPE(addr, gtype) \
   ((addr & (uint64_t)gtype_to_mem_size[gtype]-1) == 0)
 
-// definitions from racedetectors used in this header file 
-// W stands for write, R stands for read
-enum RaceType_t { RW_RACE = RW_RACE_EXIT_CODE, 
-                  WW_RACE = WW_RACE_EXIT_CODE, 
-                  WR_RACE = WR_RACE_EXIT_CODE }; 
-
-// The context in which the access is made; user = user code, 
-// update = update methods for a reducer object; reduce = reduce method for 
-// a reducer object 
-enum AccContextType_t { USER = 1, UPDATE = 2, REDUCE = 3 };
-
 // Struct to hold a pair of disjoint sets corresponding to the last reader and writer
 typedef struct MemAccess_t {
 
@@ -53,6 +43,8 @@ typedef struct MemAccess_t {
     : func(_func), rip(_rip), ref_count(0)
   { }
 
+  // NOTE: curr_top_pbag may be NULL because we create it lazily --- only
+  // valid is it's a REDUCE strand!
   inline bool races_with(uint64_t addr, bool on_stack,
                          DisjointSet_t<SPBagInterface *> *curr_top_pbag,
                          enum AccContextType_t cnt, uint64_t curr_vid) {

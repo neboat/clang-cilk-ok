@@ -8,27 +8,18 @@
 #define UNINIT_STACK_PTR ((uint64_t)0LL)
 #define UNINIT_VIEW_ID ((uint64_t)0LL)
 
-#include "mem_access.h"
+#include "cilksan.h"
 
 #define BT_OFFSET 1
 #define BT_DEPTH 2
 
-struct frameinfo;
-typedef long bagnum_t;
+// The context in which the access is made; user = user code, 
+// update = update methods for a reducer object; reduce = reduce method for 
+// a reducer object 
+enum AccContextType_t { USER = 1, UPDATE = 2, REDUCE = 3 };
+// W stands for write, R stands for read
+enum RaceType_t { RW_RACE = 1, WW_RACE = 2, WR_RACE = 3 };
 
-struct shadow_state {
-    bagnum_t bag;
-    void *bt[BT_DEPTH];
-};
-
-struct bag {
-    unsigned char rank; // rank is bounded by log_2(tree_size), so 255 is enough.
-    bool     is_p_bag; // else it's an S-bag
-    bagnum_t rep; // -1 if we represent ourselves.
-};
-
-const bagnum_t NULL_BAG = -1;
-// const shadow_state null_shadow = {0,{0}};
 
 typedef struct RaceInfo_t {
   uint64_t first_inst;   // instruction addr of the first access
@@ -66,7 +57,7 @@ void cilksan_init();
 void cilksan_deinit(); 
 void cilksan_do_enter_begin(); 
 void cilksan_do_enter_helper_begin(); 
-void cilksan_do_enter_end(uint64_t stack_ptr);
+void cilksan_do_enter_end(struct __cilkrts_worker *w, uint64_t stack_ptr);
 void cilksan_do_detach_begin();
 void cilksan_do_detach_end();
 void cilksan_do_sync_begin(); 

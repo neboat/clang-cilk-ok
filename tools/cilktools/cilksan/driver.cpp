@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <tsan/rtl/tsan_interface.h>
+#include <tsan/rtl/tsan_interface_atomic.h>
 #include <unistd.h>
 
 // runtime internal abi
@@ -13,12 +14,14 @@
 
 #include "cilksan_internal.h"
 #include "debug_util.h"
+#include "mem_access.h"
+#include "stack.h"
 
 
 // HACK --- only works for linux jmpbuf
 #define GET_RSP(sf) ((uint64_t) sf->ctx[2])
 
-// global var; FILE io used to print error messages 
+// global var: FILE io used to print error messages 
 FILE *err_io;
 
 // Defined in print_addr.cpp
@@ -37,7 +40,6 @@ static bool instrumentation = false;
 // needs to be reentrant due to reducer operations; 0 means checking
 static int checking_disabled = 0;
 
-#include "metacall.h"
 
 static inline void enable_instrumentation() {
   DBG_TRACE(DEBUG_BASIC, "Enable instrumentation.\n");
@@ -51,37 +53,33 @@ static inline void disable_instrumentation() {
 
 static inline void enable_checking() {
   checking_disabled--;
-  DBG_TRACE(DEBUG_BASIC, "%d: Enable checking (%d).\n", line, checking_disabled);
+  DBG_TRACE(DEBUG_BASIC, "%d: Enable checking.\n", checking_disabled);
   cilksan_assert(checking_disabled >= 0);
 }
 
 static inline void disable_checking() {
   cilksan_assert(checking_disabled >= 0);
   checking_disabled++;
-  DBG_TRACE(DEBUG_BASIC, "%d: Disable checking (%d).\n", line, checking_disabled);
+  DBG_TRACE(DEBUG_BASIC, "%d: Disable checking.\n", checking_disabled);
 }
 
+// outside world (including runtime).
 // Non-inlined version for user code to use
 extern "C" void __cilksan_enable_checking() {
   checking_disabled--;
   cilksan_assert(checking_disabled >= 0);
-  // DBG_TRACE(DEBUG_BASIC, "External enable checking (%d).\n", checking_disabled);
+  DBG_TRACE(DEBUG_BASIC, "External enable checking (%d).\n", checking_disabled);
 }
 
 // Non-inlined version for user code to use
 extern "C" void __cilksan_disable_checking() {
   cilksan_assert(checking_disabled >= 0);
   checking_disabled++;
-  // DBG_TRACE(DEBUG_BASIC, "External disable checking (%d).\n", checking_disabled);
+  DBG_TRACE(DEBUG_BASIC, "External disable checking (%d).\n", checking_disabled);
 }
 
 static inline bool should_check() {
   return(instrumentation && checking_disabled == 0); 
-}
-
-// XXX: Need to insert this into the runtime
-extern "C" void cilk_leave_stolen_callback() {
-  cilksan_do_leave_stolen_callback();
 }
 
 extern "C" void cilk_spawn_prepare() {
@@ -116,15 +114,14 @@ extern "C" void cilk_enter_helper_begin() {
 extern "C" void 
 cilk_enter_end(__cilkrts_stack_frame *sf, void *rsp) {
   static bool first_call = true;
-  // fprintf(stderr, "sf: %p, fp: %p, rip: %p, sp: %p.\n", 
-  // sf, sf->ctx[0], sf->ctx[1], sf->ctx[2]);
-  // apparently at this point, the jump buf is initialized
-  // cilksan_do_enter_end( GET_RSP(sf) );
-  cilksan_do_enter_end((uint64_t)rsp);
-  if(first_call) {
+
+  if(__builtin_expect(first_call, 0)) {
+    cilksan_do_enter_end(sf->worker, (uint64_t)rsp);
     first_call = false;
     // turn on instrumentation now
     enable_instrumentation();
+  } else {
+    cilksan_do_enter_end(NULL, (uint64_t)rsp);
   }
   enable_checking();
 }
@@ -142,7 +139,7 @@ extern "C" void cilk_detach_end() {
 }
 
 extern "C" void cilk_sync_begin() {
-  disable_checking();
+  disable_checking(); 
   cilksan_assert(TOOL_INITIALIZED);
   cilksan_do_sync_begin();
 }
@@ -163,7 +160,6 @@ extern "C" void cilk_leave_end() {
   enable_checking();
 }
 
- 
 // Warning warning Will Robinson!
 // __tsan_init() runs before any of the static objects' constructors run.  
 // And calls into the tsan functions can occur after some of the static 
@@ -179,7 +175,7 @@ extern "C" void cilk_leave_end() {
 
 // called upon process exit
 static void tsan_destroy(void) {
-    fprintf(err_io, "tsan_destroy called.\n");
+    // fprintf(err_io, "tsan_destroy called.\n");
     cilksan_deinit();
 
     fflush(stdout);
@@ -196,7 +192,7 @@ static void init_internal() {
 
     char *e = getenv("CILK_NWORKERS");
     if (!e || 0!=strcmp(e, "1")) {
-        fprintf(err_io, "Setting CILK_NWORKERS to be 1\n");
+        // fprintf(err_io, "Setting CILK_NWORKERS to be 1\n");
         if( setenv("CILK_NWORKERS", "1", 1) ) {
             fprintf(err_io, "Error setting CILK_NWORKERS to be 1\n");
             exit(1);
@@ -214,7 +210,7 @@ void __tsan_init() {
     // cilksan_init();
     // enable_instrumentation();
     TOOL_INITIALIZED = true;
-    fprintf(err_io, "tsan_init called.\n");
+    // fprintf(err_io, "tsan_init called.\n");
 }
 
 // invoked whenever a function enters; no need for this
@@ -230,6 +226,10 @@ void __tsan_func_exit() {
     cilksan_assert(TOOL_INITIALIZED);
     // XXX Let's focus on Cilk function for now; maybe put it back later
     // cilksan_do_function_exit();
+}
+
+void __tsan_vptr_update(void **vptr_p, void *new_val) {
+    // XXX: Not doing anything at the moment.
 }
 
 // get_user_code_rip calls the system backtrace to walk the stack to obtain 
@@ -269,9 +269,9 @@ static inline void tsan_read(void *addr, size_t size, void *rip) {
         DBG_TRACE(DEBUG_MEMORY, "%s read %p\n", __FUNCTION__, addr);
         cilksan_do_read((uint64_t)rip, (uint64_t)addr, size);
         enable_checking();
-    } /* else {
+    } else {
         DBG_TRACE(DEBUG_MEMORY, "SKIP %s read %p\n", __FUNCTION__, addr);
-    } */
+    }
 }
 
 static inline void tsan_write(void *addr, size_t size, void *rip) {
@@ -281,9 +281,9 @@ static inline void tsan_write(void *addr, size_t size, void *rip) {
         DBG_TRACE(DEBUG_MEMORY, "%s wrote %p\n", __FUNCTION__, addr);
         cilksan_do_write((uint64_t)rip, (uint64_t)addr, size);
         enable_checking();
-    } /* else {
+    } else {
         DBG_TRACE(DEBUG_MEMORY, "SKIP %s wrote %p\n", __FUNCTION__, addr);
-    } */
+    }
 }
 
 void __tsan_read1(void *addr) {
@@ -326,6 +326,13 @@ void __tsan_write16(void *addr) {
     tsan_write(addr, 16, __builtin_return_address(0));
 }
 
+extern "C"
+int __tsan_atomic32_fetch_add(volatile int *a, int v, __tsan_memory_order mo) {
+    // not doing anything right now
+    // fprintf(stderr, "XXX atomic fetch add called: int: %p, v %d, mo %d.\n", a, v, mo);
+  return 0;
+}
+
 typedef void*(*malloc_t)(size_t);
 static malloc_t real_malloc = NULL;
 
@@ -348,8 +355,6 @@ extern "C" void* malloc(size_t s) {
 
     if(TOOL_INITIALIZED && should_check()) {
         // cilksan_clear_shadow_memory((size_t)r, (size_t)r+malloc_usable_size(r)-1);
-// fprintf(stderr, "XXX usable: %u, new: %u.\n", malloc_usable_size(r), new_size);
-//         cilksan_assert(malloc_usable_size(r) == new_size);
         cilksan_clear_shadow_memory((size_t)r, (size_t)r+new_size);
     }
 

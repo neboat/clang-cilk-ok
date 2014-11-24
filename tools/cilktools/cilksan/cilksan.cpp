@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdlib.h>
 #include <unordered_map>
+// #include <map>
 #include <vector>
 
 #include <execinfo.h>
@@ -39,6 +40,10 @@ long DisjointSet_t<DISJOINTSET_DATA_T>::debug_count = 0;
 long SBag_t::debug_count = 0;
 long PBag_t::debug_count = 0;
 #endif
+
+#define NOP_STEAL 0      // a steal point that skips over the first interval
+#define MAX_NUM_STEALS 3 // max number of steal points; just need 3 to 
+                         // define the unit reduce operation to check
 
 // range of stack used by the process 
 uint64_t stack_low_addr = 0; 
@@ -79,14 +84,22 @@ static uint32_t num_of_sync_blocks = 0;
 static uint64_t accounted_max_cont_depth = 0;
 
 
+// if set, we are stealing every continuation that can be stolen
 static bool simulate_all_steals = false;
 // if set, we are checking the reduce functions instead of updates
 static bool check_reduce = false;
+// check updates with simulated steals that occur at contiuation w/ this depth
+static uint64_t cont_depth_to_check = 0;
+
+// user specified steal points; 
+// if set, every sync block simulate steals at these points.
+static uint32_t steal_point1 = NOP_STEAL;
+static uint32_t steal_point2 = NOP_STEAL;
+static uint32_t steal_point3 = NOP_STEAL;
+
 // the maximum sync block size from user input, which we will use for checking
 // reduce / update functions 
 static uint32_t max_sync_block_size = 0;
-// check updates with simulated steals that occur at contiuation w/ this depth
-static uint64_t cont_depth_to_check = 0;
 
 // ANGE: Each function that causes a Disjoint set to be created has a 
 // unique ID (i.e., Cilk function and spawned C function).
@@ -103,10 +116,6 @@ static uint64_t frame_id = 0;
 // called functions and the first spawned child inherits the most recent view
 // created within the parent context.
 static uint64_t view_id = 1;
-
-#define NOP_STEAL 0      // a steal point that skips over the first interval
-#define MAX_NUM_STEALS 3 // max number of steal points; just need 3 to 
-                         // define the unit reduce operation to check
 
 // Struct for keeping track of shadow frame
 typedef struct FrameData_t {
@@ -162,8 +171,10 @@ static std::vector< DisjointSet_t<SPBagInterface *> * > dset_nodes;
 // Shadow memory, or the unordered hashmap that maps a memory address to its 
 // last reader and writer
 typedef std::unordered_map<uint64_t, MemAccessList_t *>::iterator ShadowMemIter_t;
+// XXX throw float point exception at size 8844858
 static std::unordered_map<uint64_t, MemAccessList_t *> shadow_mem;
-
+// typedef std::map<uint64_t, MemAccessList_t *>::iterator ShadowMemIter_t;
+// static std::map<uint64_t, MemAccessList_t *> shadow_mem;
 
 /// The following are needed to determine when we enter and exit a
 /// spawned function and their status in the runtime.
@@ -203,6 +214,7 @@ static Stack_t<Entry_t> entry_stack;
 // turn invokes the identity function.  Both are UPDATE, but we
 // need to stay in UPDATE when the inner UPDATE context ends.
 // XXX: Not doing anything with this right now; FIXME later
+// declared in driver.c
 static Stack_t<enum AccContextType_t> context_stack; 
 
 // The following fields are for debugging purpose only, used by the tool to
@@ -226,6 +238,92 @@ static int rts_deque_end;
 static uint32_t youngest_active_helper = 0;
 #endif
 
+static struct __cilkrts_worker *worker;
+
+// probably not good practice, but ...
+#include "cilksan_reducer.h"
+
+
+// extern functions, defined in print_addr.cpp
+extern void print_race_report();
+extern int get_num_races_found(); 
+
+
+/*************************************************************************/
+/**  Interfacing functions (stuff defined by cilksan lib called by 
+ **  either user code or runtime)
+/*************************************************************************/
+extern "C" void __cilksan_begin_reduce_strand() {
+  enum AccContextType_t cur = *(context_stack.head());
+  DBG_TRACE(DEBUG_REDUCER, "Enter REDUCE context %u -> %u.\n", cur, REDUCE);
+  context_stack.push();
+  *(context_stack.head()) = REDUCE;
+}
+
+extern "C" void __cilksan_end_reduce_strand() {
+  enum AccContextType_t cur = *(context_stack.head());
+  cilksan_assert(cur == REDUCE);
+  context_stack.pop();
+  DBG_TRACE(DEBUG_REDUCER, "Leave REDUCE context %u -> %u.\n", cur, *context_stack.head());
+}
+
+extern "C" void __cilksan_begin_update_strand() {
+  enum AccContextType_t cur = *(context_stack.head());
+  context_stack.push();
+  if(cur == REDUCE) {
+    *(context_stack.head()) = REDUCE; // REDUCE subsumes UPDATE
+    DBG_TRACE(DEBUG_REDUCER, 
+              "Enter UPDATE context, subsumed by REDUCE %u -> %u.\n", cur, REDUCE);
+  } else {
+    *(context_stack.head()) = UPDATE;
+    DBG_TRACE(DEBUG_REDUCER, "Enter UPDATE context %u -> %u.\n", cur, UPDATE);
+  }
+}
+
+extern "C" void __cilksan_end_update_strand() {
+  enum AccContextType_t cur = *(context_stack.head());
+  cilksan_assert(cur == UPDATE || cur == REDUCE);
+  context_stack.pop();
+  DBG_TRACE(DEBUG_REDUCER, "Leave UPDATE context %u -> %u.\n", cur, *context_stack.head());
+}
+
+extern "C" int __cilksan_is_running() {
+  return 1;
+}
+
+// This function gets called at the beginning of runtime startup.
+// The runtime calls this function to see if cilksan intends to 
+// simulate steals in this particular execution.
+extern "C" int __cilksan_check_for_simulate_steals() {
+  return (cont_depth_to_check || check_reduce || simulate_all_steals);
+}
+
+// This function gets called when the runtime is performing:
+//
+// A. the return protocol for a spawned child whose parent (call it f) has 
+// been stolen; and 
+// B. a non-trivial cilk_sync
+// to figure out which "interval" we are in right now.
+//
+// Call the steal points i1, i2, and i3, as chosen by
+// randomize_steal_points() function (and stored in f->steal_points[]).
+// interval 1 will be [i1, i2-1] (inclusive both ends), and 
+// interval 2 will be [i2, i3-1] (inclusive both ends).
+// interval 0 will be what comes before i1 and interval 3 will be what 
+// comes after i3; these two intervals could be empty.
+//
+// This function returns (current interval << 1) & end_of_interval
+// see get_current_reduce_interval. 
+extern "C" unsigned int __cilksan_check_for_reduce_interval(int spawn_ret) {
+  return get_current_reduce_interval(spawn_ret);
+}
+
+// This function gets called when the runtime is about to 
+// perform a merge of hypermaps.
+extern "C" void __cilksan_invoke_reduce() {
+  update_disjointsets(); 
+}
+ 
 /*************************************************************************/
 /**  Events functions
 /*************************************************************************/
@@ -387,6 +485,7 @@ static void complete_sync() {
                          f->Sbag->get_set_node()->get_func_id() );
     f->Pbags[0] = NULL;
   }
+
   start_new_sync_block();
 }
 
@@ -400,6 +499,14 @@ void cilksan_do_enter_begin() {
   WHEN_CILKSAN_DEBUG( last_event = ENTER_FRAME; )
   DBG_TRACE(DEBUG_CALLBACK, "frame %ld cilk_enter_frame_begin\n", frame_id+1);
 
+/*
+  if(entry_stack.size()==1) { 
+    // we are entering the top-level Cilk function; everything we did
+    // before can be cleared, since we can't possibly be racing with
+    // anything old at this point
+    shadow_mem.clear();
+  }
+*/
   entry_stack.push();
   entry_stack.head()->entry_type = SPAWNER;
   entry_stack.head()->frame_type = SHADOW_FRAME;
@@ -420,11 +527,12 @@ void cilksan_do_enter_helper_begin() {
   entry_stack.head()->frame_type = SHADOW_FRAME;
   // entry_stack always gets pushed slightly before frame_id gets incremented
   WHEN_CILKSAN_DEBUG( entry_stack.head()->frame_id = frame_id+1; )
-
-  // WHEN_CILKSAN_DEBUG( update_deque_for_entering_helper(); )
+  WHEN_CILKSAN_DEBUG( update_deque_for_entering_helper(); )
 }
 
-void cilksan_do_enter_end(uint64_t stack_ptr) {
+void cilksan_do_enter_end(struct __cilkrts_worker *w, uint64_t stack_ptr) {
+
+  if(__builtin_expect(w != NULL, 0)) { worker = w; } 
 
   cilksan_assert(CILKSAN_INITIALIZED);
   FrameData_t *cilk_func = frame_stack.head();
@@ -460,11 +568,10 @@ void cilksan_do_detach_end() {
       parent->current_sync_block_size, 
       parent->init_cont_depth + parent->current_sync_block_size); 
 
-/*
   if( should_steal_next_continuation() ) {
-    simulate_steal(context);
+    simulate_steal();
   }
-*/
+
   if( !parent->Pbags[parent->Pbag_index] ) { // lazily create PBags when needed
     DBG_TRACE(DEBUG_BAGS,
         "frame %ld creates a PBag with index %d and view %lu.\n",
@@ -523,8 +630,6 @@ void cilksan_do_leave_end() {
   WHEN_CILKSAN_DEBUG( last_event = NONE; )
   cilksan_assert(entry_stack.size() > 1);
 
-  // XXX: Put it back later
-#if 0
   if(entry_stack.head()->entry_type == HELPER) {
     WHEN_CILKSAN_DEBUG( update_deque_for_leaving_spawn_helper(); )
 
@@ -538,7 +643,6 @@ void cilksan_do_leave_end() {
   } else {
     WHEN_CILKSAN_DEBUG( update_deque_for_leaving_cilk_function(); )
   }
-#endif
 
   // we delay the pop of the entry_stack much later than frame_stack (in 
   // leave_end instead of leave_begin), because we need to know whether the
@@ -553,7 +657,7 @@ void cilksan_do_leave_end() {
 // This is the case when __cilkrts_leave_frame never returns; instead we go
 // back to the runtime, and the runtime is issuing the matching leave_end.
 // So we need to do the same operation as in cilk_leave_end_callback.
-void cilksan_do_leave_stolen_callback() {
+void __cilksan_do_leave_stolen_callback() {
 
   cilksan_assert(CILKSAN_INITIALIZED);
   DBG_TRACE(DEBUG_CALLBACK, "frame %ld cilk_leave_stolen\n", 
@@ -562,11 +666,10 @@ void cilksan_do_leave_stolen_callback() {
   // This callback should only be invoked when we are leaving a HELPER frame
   cilksan_assert(entry_stack.size() > 1 && 
                  entry_stack.head()->entry_type == HELPER);
-  // WHEN_CILKSAN_DEBUG( update_deque_for_leaving_spawn_helper(); )
+  WHEN_CILKSAN_DEBUG( update_deque_for_leaving_spawn_helper(); )
   
   // Update the PBag_index and view_id
-  // XXX: Put it back later
-  // update_reducer_view();
+  update_reducer_view();
   entry_stack.pop();
 
   // we are going back to runtime loop next
@@ -608,7 +711,6 @@ record_mem_helper(bool is_read, uint64_t inst_addr, uint64_t addr,
         new MemAccessList_t(addr, is_read, acc, mem_size);
     std::pair<uint64_t, MemAccessList_t *> new_pair(ADDR_TO_KEY(addr), mem_list); 
     shadow_mem.insert(new_pair);
-
   } else {
     // else check for race and update the existing MemAccessList_t 
     MemAccessList_t *mem_list = val->second;
@@ -618,7 +720,6 @@ record_mem_helper(bool is_read, uint64_t inst_addr, uint64_t addr,
     WHEN_CILKSAN_DEBUG( 
       mem_list->check_invariants(f->Sbag->get_node()->get_func_id()); )
 
-    // XXX: for now, assume in user context; need to fix it for reducers
     mem_list->check_races_and_update(is_read, inst_addr, addr, mem_size, 
                                      on_stack, *(context_stack.head()), 
                                      f->Sbag, top_pbag, f->curr_view_id);
@@ -715,19 +816,13 @@ static void print_cilksan_stat() {
             << accounted_max_cont_depth << std::endl;
 }
 
-// Defined in print_addr.cpp
-extern void print_addr(FILE *f, void *a);
-extern void print_race_report();
-extern int get_num_races_found(); 
-
 void cilksan_deinit() {
 
   static bool deinit = false;
   // XXX: kind of a hack, but somehow this gets called twice.
-  if(deinit) { deinit = true; } 
+  if(!deinit) { deinit = true; } 
   else { return; /* deinit-ed already */ }
 
-fprintf(stderr, "cilksan deinit called.\n");
   MemAccessList_t *acc_list;
   ShadowMemIter_t iter;
 
@@ -738,11 +833,13 @@ fprintf(stderr, "cilksan deinit called.\n");
   cilksan_assert(entry_stack.size() == 1);
   cilksan_assert(context_stack.size() == 1);
 
+  shadow_mem.clear();
+  /*
   for( iter = shadow_mem.begin(); iter != shadow_mem.end(); iter++ ) {
     acc_list = iter->second;
     cilksan_assert(acc_list);
     delete acc_list;
-  }
+  } */
 
   DisjointSet_t<SPBagInterface *> *ds_node = NULL;
   while( !dset_nodes.empty() ) {
@@ -761,15 +858,12 @@ fprintf(stderr, "cilksan deinit called.\n");
 }
 
 void cilksan_init() {
-fprintf(stderr, "cilksan_init called.\n");
   cilksan_assert(stack_high_addr != 0 && stack_low_addr != 0);
-  // XXX Need to figure out how to pass args from user code to tool
-  // parse_input(); 
   
   // these are true upon creation of the stack
   cilksan_assert(frame_stack.size() == 1);
   cilksan_assert(entry_stack.size() == 1);
-  // XXX actually only used for debugging of reducer race detection
+  // actually only used for debugging of reducer race detection
   WHEN_CILKSAN_DEBUG( rts_deque_begin = rts_deque_end = 1; )
 
   // for the main function before we enter the first Cilk context
@@ -789,15 +883,65 @@ fprintf(stderr, "cilksan_init called.\n");
 }
 
 extern "C" int __cilksan_error_count() {
-    return get_num_races_found();
+  return get_num_races_found();
 }
 
-/* XXX: Put it back later
-static void parse_input() {
+// This funciton parse the input supplied to the user program
+// and get the params meant for cilksan (everything after "--").  
+// It return the index in which it found "--" so the user program
+// knows when to stop parsing inputs.
+extern "C" int __cilksan_parse_input(int argc, char *argv[]) {
 
-  check_reduce = KnobCheckReduce.Value();
-  cont_depth_to_check = KnobContDepth.Value();
-  max_sync_block_size = KnobSBSize.Value();
+  int i = 0;
+  uint32_t seed = 0;
+  int stop = 0;
+
+  while(i < argc) {
+    if(!strncmp(argv[i], "--", strlen("--")+1)) {
+      stop = i++;
+      break;
+    }
+    i++;
+  }
+
+  while(i < argc) {
+    char *arg = argv[i];
+    if(!strncmp(arg, "-cr", strlen("-cr")+1)) {
+      i++;
+      check_reduce = true;
+      continue;
+
+    } else if(!strncmp(arg, "-update", strlen("-update")+1)) {
+      i++;
+      cont_depth_to_check = (uint64_t) atol(argv[i++]);
+      continue; 
+
+    } else if(!strncmp(arg, "-sb_size", strlen("-sb_size")+1)) {
+      i++;
+      max_sync_block_size = (uint32_t) atoi(argv[i++]);
+      continue;
+
+    } else if(!strncmp(arg, "-s", strlen("-s")+1)) {
+      i++;
+      seed = (uint32_t) atoi(argv[i++]);
+      continue;
+
+    } else if(!strncmp(arg, "-steal", strlen("-steal")+1)) {
+      i++;
+      steal_point1 = (uint32_t) atoi(argv[i++]);
+      steal_point2 = (uint32_t) atoi(argv[i++]);
+      steal_point3 = (uint32_t) atoi(argv[i++]);
+      cilksan_assert(steal_point1 < steal_point2 
+                  && steal_point2 < steal_point3);
+      check_reduce = true;
+      continue;
+
+    } else {
+      i++; 
+      std::cout << "Unrecognized input " << arg << ", ignore and continue."
+                << std::endl;
+    }
+  }
 
   std::cout << "==============================================================="
             << std::endl;
@@ -809,11 +953,24 @@ static void parse_input() {
     std::cout << "This run will check reduce functions for races " << std::endl
               << "with simulated steals ";
     if(max_sync_block_size > 1) {
-      std::cout << "at randomly chosen continuation points.";
+      std::cout << "at randomly chosen continuation points \n"
+                << "(assume block size "
+                << max_sync_block_size << ")";
+      if(seed) {
+        std::cout << ", chosen using seed " << seed;
+        srand(seed);
+      } else {
+        // srand(time(NULL));
+      }
     } else {
-      simulate_all_steals = true;
-      check_reduce = false; 
-      std::cout << "at every continuation point.";
+      if(steal_point1 != steal_point2 && steal_point2 != steal_point3) {
+        std::cout << "at steal points: " << steal_point1 << ", " 
+                  << steal_point2 << ", " << steal_point3 << ".";
+      } else {
+        simulate_all_steals = true;
+        check_reduce = false; 
+        std::cout << "at every continuation point.";
+      }
     }
   } else {
     // cont_depth_to_check == 0 and check_reduce = false 
@@ -823,8 +980,18 @@ static void parse_input() {
   std::cout << "==============================================================="
             << std::endl;
 
-  racedetector_assert(!check_reduce || cont_depth_to_check == 0);
-  racedetector_assert(!check_reduce || max_sync_block_size > 1);
+  cilksan_assert(!check_reduce || cont_depth_to_check == 0);
+  cilksan_assert(!check_reduce || max_sync_block_size > 1 || steal_point1 != steal_point2);
+
+  return (stop == 0 ? argc : stop);
 }
-*/
+
+// XXX: Should really be in print_addr.cpp, but this will do for now 
+void print_current_function_info() {
+  FrameData_t *f = frame_stack.head();
+  std::cout << "steal points: " << f->steal_points[0] << ", " 
+            << f->steal_points[1] << ", " << f->steal_points[2] << std::endl;
+  std::cout << "curr sync block size: " << f->current_sync_block_size << std::endl;
+  std::cout << "frame id: " << f->Sbag->get_node()->get_func_id() << std::endl;
+}
 
