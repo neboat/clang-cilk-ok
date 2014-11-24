@@ -33,6 +33,8 @@ namespace stack_frame_cleanup {
     test_f1<int, 23>();
     // CHECK_PARENT: define {{.*}} @_ZN19stack_frame_cleanup7test_f1IiLi23EEEvv
     // CHECK_PARENT: alloca %__cilkrts_stack_frame
+    // CHECK_PARENT-NEXT: call i8* @llvm.returnaddress(i32 0)
+    // CHECK_PARENT-NEXT: call i8* @llvm.stacksave()
     // CHECK_PARENT-NEXT: call void @__cilk_parent_prologue
     // CHECK_PARENT: invoke void @__cilk_spawn_helper
     //

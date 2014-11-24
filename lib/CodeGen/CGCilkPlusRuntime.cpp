@@ -937,36 +937,38 @@ static Function *Get__cilkrts_enter_frame_fast_1(CodeGenFunction &CGF) {
 /// \brief Get or create a LLVM function for __cilk_parent_prologue.
 /// It is equivalent to the following C code
 ///
-/// void __cilk_parent_prologue(__cilkrts_stack_frame *sf) {
+/// void __cilk_parent_prologue(__cilkrts_stack_frame *sf,
+///                             void *pc, void *sp) {
+///   cilk_enter_begin(sf, pc);
 ///   __cilkrts_enter_frame_1(sf);
+///   cilk_enter_end(sf, sp);
 /// }
 static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
   Function *Fn = 0;
 
-  if (GetOrCreateFunction<cilk_func>("__cilk_parent_prologue", CGF, Fn))
+  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *);
+  if (GetOrCreateFunction<cilk_func_2>("__cilk_parent_prologue", CGF, Fn))
     return Fn;
 
   // If we get here we need to add the function body
   LLVMContext &Ctx = CGF.getLLVMContext();
 
-  Value *SF = Fn->arg_begin();
+  Function::arg_iterator args = Fn->arg_begin();
+  Value *SF = args;
+  Value *PC = ++args;
+  Value *SP = ++args;
 
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
+
   // cilk_enter_begin
-  Value* cilk_enter_begin_args[2]
-      = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
-                          B.getInt32(0))};
-  B.CreateCall(CILK_OK_FUNC(enter_begin, CGF),
-               ArrayRef<Value *>(cilk_enter_begin_args));
+  B.CreateCall2(CILK_OK_FUNC(enter_begin, CGF), SF, PC);
 
   // __Cilkrts_enter_frame_1(sf)
   B.CreateCall(CILKRTS_FUNC(enter_frame_1, CGF), SF);
+
   // cilk_enter_end
-  Value* cilk_enter_end_args[2]
-      = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave))};
-  B.CreateCall(CILK_OK_FUNC(enter_end, CGF),
-               ArrayRef<Value *>(cilk_enter_end_args));
+  B.CreateCall2(CILK_OK_FUNC(enter_end, CGF), SF, SP);
 
   B.CreateRetVoid();
 
@@ -979,9 +981,11 @@ static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
 /// It is equivalent to the following C code
 ///
 /// void __cilk_parent_epilogue(__cilkrts_stack_frame *sf) {
+///   cilk_leave_begin(sf);
 ///   __cilkrts_pop_frame(sf);
 ///   if (sf->flags != CILK_FRAME_VERSION)
 ///     __cilkrts_leave_frame(sf);
+///   cilk_leave_end();
 /// }
 static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
   Function *Fn = 0;
@@ -1040,41 +1044,43 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
 /// \brief Get or create a LLVM function for __cilk_helper_prologue.
 /// It is equivalent to the following C code
 ///
-/// void __cilk_helper_prologue(__cilkrts_stack_frame *sf) {
+/// void __cilk_helper_prologue(__cilkrts_stack_frame *sf,
+///                             void *pc, void *sp) {
+///   cilk_enter_helper_begin(sf, pc);
 ///   __cilkrts_enter_frame_fast_1(sf);
+///   cilk_enter_end(sf, sp);
+///   cilk_detach_begin(sf);
 ///   __cilkrts_detach(sf);
+///   cilk_detach_end();
 /// }
 static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
   Function *Fn = 0;
 
-  if (GetOrCreateFunction<cilk_func>("__cilk_helper_prologue", CGF, Fn))
+  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *);
+  if (GetOrCreateFunction<cilk_func_2>("__cilk_helper_prologue", CGF, Fn))
     return Fn;
 
   // If we get here we need to add the function body
   LLVMContext &Ctx = CGF.getLLVMContext();
 
-  Value *SF = Fn->arg_begin();
+  Function::arg_iterator args = Fn->arg_begin();
+  Value *SF = args;
+  Value *PC = ++args;
+  Value *SP = ++args;
 
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
 
-  // cilk_enter_helper_begin
-  Value* cilk_enter_begin_args[2]
-      = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
-                          B.getInt32(0))};
-  B.CreateCall(CILK_OK_FUNC(enter_helper_begin, CGF),
-               ArrayRef<Value *>(cilk_enter_begin_args));
+  // cilk_enter_helper_begin(sf, pc)
+  B.CreateCall2(CILK_OK_FUNC(enter_helper_begin, CGF), SF, PC);
 
   // __cilkrts_enter_frame_fast_1(sf);
   B.CreateCall(CILKRTS_FUNC(enter_frame_fast_1, CGF), SF);
 
-  // cilk_enter_end
-  Value* cilk_enter_end_args[2]
-      = {SF, B.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave))};
-  B.CreateCall(CILK_OK_FUNC(enter_end, CGF),
-               ArrayRef<Value *>(cilk_enter_end_args));
+  // cilk_enter_end(sf, sp)
+  B.CreateCall2(CILK_OK_FUNC(enter_end, CGF), SF, SP);
 
-  // cilk_detach_begin
+  // cilk_detach_begin(sf)
   B.CreateCall(CILK_OK_FUNC(detach_begin, CGF), SF);
   // __cilkrts_detach(sf);
   B.CreateCall(CILKRTS_FUNC(detach, CGF), SF);
@@ -1092,10 +1098,12 @@ static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
 /// It is equivalent to the following C code
 ///
 /// void __cilk_helper_epilogue(__cilkrts_stack_frame *sf) {
+///   cilk_leave_begin(sf);
 ///   if (sf->worker) {
 ///     __cilkrts_pop_frame(sf);
 ///     __cilkrts_leave_frame(sf);
 ///   }
+///   cilk_leave_end();
 /// }
 static llvm::Function *GetCilkHelperEpilogue(CodeGenFunction &CGF) {
   Function *Fn = 0;
@@ -1430,7 +1438,13 @@ void CGCilkPlusRuntime::EmitCilkParentStackFrame(CodeGenFunction &CGF) {
   {
     assert(CGF.AllocaInsertPt && "not initializied");
     CGBuilderTy Builder(CGF.AllocaInsertPt);
-    Builder.CreateCall(GetCilkParentPrologue(CGF), SF);
+    llvm::Value *PC
+        = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+                             Builder.getInt32(0));
+    llvm::Value *SP
+        = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave));
+
+    Builder.CreateCall3(GetCilkParentPrologue(CGF), SF, PC, SP);
   }
 
   // Push cleanups associated to this stack frame initialization.
@@ -1468,8 +1482,19 @@ void CGCilkPlusRuntime::EmitCilkHelperPrologue(CodeGenFunction &CGF) {
   Value *SF = LookupStackFrame(CGF);
   assert(SF && "null stack frame unexpected");
 
-  // Initialize the stack frame and detach
-  CGF.Builder.CreateCall(GetCilkHelperPrologue(CGF), SF);
+  {
+    assert(CGF.AllocaInsertPt && "not initializied");
+    CGBuilderTy Builder(CGF.AllocaInsertPt);
+
+    Value *PC
+        = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+                             Builder.getInt32(0));
+    Value *SP
+        = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave));
+
+    // Initialize the stack frame and detach
+    CGF.Builder.CreateCall3(GetCilkHelperPrologue(CGF), SF, PC, SP);
+  }
 }
 
 /// \brief A utility function for finding the enclosing CXXTryStmt if exists.

@@ -102,7 +102,9 @@ int i() {
 void test1() {
   // CHECK-CILK1: define void @_Z5test1v()
   // CHECK-CILK1: %__cilkrts_sf = alloca %__cilkrts_stack_frame
-  // CHECK-CILK1: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf)
+  // CHECK-CILK1: call i8* @llvm.frameaddress(i32 0)
+  // CHECK-CILK1: call i8* @llvm.stacksave()
+  // CHECK-CILK1: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf, i8* %0, i8* %1)
 
   // CHECK-CILK1: call i8* @llvm.frameaddress
   // CHECK-CILK1: call i8* @llvm.stacksave

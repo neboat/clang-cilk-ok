@@ -32,7 +32,7 @@ void test1() {
   // CHECK: define void @_Z5test1v()
 
   // CHECK: %__cilkrts_sf = alloca %__cilkrts_stack_frame
-  // CHECK: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf)
+  // CHECK: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf, i8* %0, i8* %1)
 
   global = _Cilk_spawn Fib(BIG_NUM);
 
@@ -69,7 +69,7 @@ void test2() {
   // CHECK: define void @_Z5test2v()
 
   // CHECK: %__cilkrts_sf = alloca %__cilkrts_stack_frame
-  // CHECK: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf)
+  // CHECK: call void @__cilk_parent_prologue(%__cilkrts_stack_frame* %__cilkrts_sf, i8* %0, i8* %1)
 
   global = _Cilk_spawn Fib(BIG_NUM);
 
