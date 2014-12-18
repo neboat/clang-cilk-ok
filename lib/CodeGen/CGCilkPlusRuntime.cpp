@@ -104,6 +104,9 @@ typedef void (cilk_sync_end)(__cilkrts_stack_frame *);
 typedef void (cilk_leave_begin)(__cilkrts_stack_frame *);
 typedef void (cilk_leave_end)();
 
+typedef void (cilk_tool_c_function_enter)(void *rip);
+typedef void (cilk_tool_c_function_leave)(void *rip);
+
 } // namespace
 
 #define CILKRTS_FUNC(name, CGF) Get__cilkrts_##name(CGF)
@@ -148,6 +151,9 @@ GET_CILK_OK_FUNC(sync_begin)
 GET_CILK_OK_FUNC(sync_end)
 GET_CILK_OK_FUNC(leave_begin)
 GET_CILK_OK_FUNC(leave_end)
+
+GET_CILK_OK_FUNC(tool_c_function_enter)
+GET_CILK_OK_FUNC(tool_c_function_leave)
 
 typedef std::map<llvm::LLVMContext*, llvm::StructType*> TypeBuilderCache;
 
@@ -1425,6 +1431,17 @@ public:
   }
 };
 
+struct CilktoolCFunctionEntryCleanup : public EHScopeStack::Cleanup {
+public:
+  void Emit(CodeGenFunction &CGF, Flags F) {
+    llvm::Value *PC = CGF.Builder.CreateCall(
+                            CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+                            CGF.Builder.getInt32(0));
+    // Generate call to cilk_tool_c_function_leave
+    CGF.Builder.CreateCall(CILK_OK_FUNC(tool_c_function_leave, CGF), PC);
+  }
+};
+
 } // anonymous namespace
 
 /// \brief Emit code to create a Cilk stack frame for the parent function and
@@ -1495,6 +1512,26 @@ void CGCilkPlusRuntime::EmitCilkHelperPrologue(CodeGenFunction &CGF) {
     // Initialize the stack frame and detach
     CGF.Builder.CreateCall3(GetCilkHelperPrologue(CGF), SF, PC, SP);
   }
+}
+
+/// \brief Emit code that calls the instrumentation for C function entry 
+/// Even though the instrumentaion is for C code, the instrumentation
+/// only applies when we are using a Cilk tool, so include it in this file.
+void CGCilkPlusRuntime::EmitCilktoolCFunctionPrologue(CodeGenFunction &CGF) {
+
+  // Get the code point where normally alloca is called
+  assert(CGF.AllocaInsertPt && "not initializied");
+  CGBuilderTy Builder(CGF.AllocaInsertPt);
+  llvm::Value *PC
+        = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
+                             Builder.getInt32(0));
+
+  // Generate call to cilk_tool_c_function_enter
+  Builder.CreateCall(CILK_OK_FUNC(tool_c_function_enter, CGF), PC);
+
+  // Push cleanups associated to this function entry call (i.e., the 
+  // correpsonding function exit call)
+  CGF.EHStack.pushCleanup<CilktoolCFunctionEntryCleanup>(NormalAndEHCleanup);
 }
 
 /// \brief A utility function for finding the enclosing CXXTryStmt if exists.
