@@ -594,6 +594,8 @@ def fmodules_decluse : Flag <["-"], "fmodules-decluse">, Group<f_Group>,
 def fretain_comments_from_system_headers : Flag<["-"], "fretain-comments-from-system-headers">, Group<f_Group>, Flags<[CC1Option]>;
 def fcilkplus : Flag <["-"], "fcilkplus">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Enable Cilk Plus extensions">;
+def fcilktool_instr_c : Flag <["-"], "fcilktool-instr-c">, Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Enable Cilk tool instrumentations for C functions">;
 
 def fmudflapth : Flag<["-"], "fmudflapth">, Group<f_Group>;
 def fmudflap : Flag<["-"], "fmudflap">, Group<f_Group>;

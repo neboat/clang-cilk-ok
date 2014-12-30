@@ -56,7 +56,7 @@ public:
   void pushCilkImplicitSyncCleanup(CodeGenFunction &CGF);
 
   // for Cilk tools
-  void EmitCilktoolCFunctionPrologue(CodeGenFunction &CGF); 
+  void EmitCilkToolCFunctionPrologue(CodeGenFunction &CGF); 
 };
 
 /// \brief API to query if an implicit sync is necessary during code generation.

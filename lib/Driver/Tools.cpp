@@ -3005,6 +3005,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddLastArg(CmdArgs, options::OPT_fdiagnostics_show_template_tree);
   Args.AddLastArg(CmdArgs, options::OPT_fno_elide_type);
   Args.AddLastArg(CmdArgs, options::OPT_fcilkplus);
+  Args.AddLastArg(CmdArgs, options::OPT_fcilktool_instr_c);
 
   if (Args.hasArg(options::OPT_fcilkplus))
     if (getToolChain().getTriple().getOS() != llvm::Triple::Linux &&

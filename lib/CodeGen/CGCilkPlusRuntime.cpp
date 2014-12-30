@@ -1431,7 +1431,7 @@ public:
   }
 };
 
-struct CilktoolCFunctionEntryCleanup : public EHScopeStack::Cleanup {
+struct CilkToolCFunctionEntryCleanup : public EHScopeStack::Cleanup {
 public:
   void Emit(CodeGenFunction &CGF, Flags F) {
     llvm::Value *PC = CGF.Builder.CreateCall(
@@ -1517,7 +1517,7 @@ void CGCilkPlusRuntime::EmitCilkHelperPrologue(CodeGenFunction &CGF) {
 /// \brief Emit code that calls the instrumentation for C function entry 
 /// Even though the instrumentaion is for C code, the instrumentation
 /// only applies when we are using a Cilk tool, so include it in this file.
-void CGCilkPlusRuntime::EmitCilktoolCFunctionPrologue(CodeGenFunction &CGF) {
+void CGCilkPlusRuntime::EmitCilkToolCFunctionPrologue(CodeGenFunction &CGF) {
 
   // Get the code point where normally alloca is called
   assert(CGF.AllocaInsertPt && "not initializied");
@@ -1531,7 +1531,7 @@ void CGCilkPlusRuntime::EmitCilktoolCFunctionPrologue(CodeGenFunction &CGF) {
 
   // Push cleanups associated to this function entry call (i.e., the 
   // correpsonding function exit call)
-  CGF.EHStack.pushCleanup<CilktoolCFunctionEntryCleanup>(NormalAndEHCleanup);
+  CGF.EHStack.pushCleanup<CilkToolCFunctionEntryCleanup>(NormalAndEHCleanup);
 }
 
 /// \brief A utility function for finding the enclosing CXXTryStmt if exists.

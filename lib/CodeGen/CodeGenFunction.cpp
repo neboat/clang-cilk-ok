@@ -643,13 +643,15 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   }
 
   EmitFunctionProlog(*CurFnInfo, CurFn, Args);
-  // If we are in Cilk Plus mode and this is a regular C function (i.e,
-  // not a spawn helper), emit an instrumentation call to function entry.
+  // If we are in Cilk Plus mode, if this is a regular C function (i.e,
+  // not a spawn helper), and if the flag -fcilktool-instr-c is set, emit 
+  // an instrumentation call to function entry.
   // We tell whether this function is a spawn helper by looking at
   // whether the CapturedStmtInfo has a CGCilkSpawnInfo type.
   if( getLangOpts().CilkPlus && D && !D->isSpawning() &&
+      CGM.getCodeGenOpts().CilkToolInstrumtC && 
       dyn_cast_or_null<CGCilkSpawnInfo>(CapturedStmtInfo) == NULL ) {
-    CGM.getCilkPlusRuntime().EmitCilktoolCFunctionPrologue(*this);
+    CGM.getCilkPlusRuntime().EmitCilkToolCFunctionPrologue(*this);
   }
 
   if (D && isa<CXXMethodDecl>(D) && cast<CXXMethodDecl>(D)->isInstance()) {
