@@ -978,7 +978,8 @@ static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
 
   B.CreateRetVoid();
 
-  Fn->addFnAttr(Attribute::InlineHint);
+  // Fn->addFnAttr(Attribute::InlineHint);
+  Fn->addFnAttr(Attribute::AlwaysInline);
 
   return Fn;
 }
@@ -1042,7 +1043,8 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
     B.CreateRetVoid();
   }
 
-  Fn->addFnAttr(Attribute::InlineHint);
+  // Fn->addFnAttr(Attribute::InlineHint);
+  Fn->addFnAttr(Attribute::AlwaysInline);
 
   return Fn;
 }
@@ -1095,7 +1097,8 @@ static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
 
   B.CreateRetVoid();
 
-  Fn->addFnAttr(Attribute::InlineHint);
+  // Fn->addFnAttr(Attribute::InlineHint);
+  Fn->addFnAttr(Attribute::AlwaysInline);
 
   return Fn;
 }
@@ -1158,7 +1161,8 @@ static llvm::Function *GetCilkHelperEpilogue(CodeGenFunction &CGF) {
     B.CreateRetVoid();
   }
 
-  Fn->addFnAttr(Attribute::InlineHint);
+  // Fn->addFnAttr(Attribute::InlineHint);
+  Fn->addFnAttr(Attribute::AlwaysInline);
 
   return Fn;
 }
