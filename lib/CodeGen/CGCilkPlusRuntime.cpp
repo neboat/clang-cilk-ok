@@ -92,8 +92,8 @@ typedef void (__cilkrts_cilk_for_64)(__cilk_abi_f64_t body, void *data,
 
 typedef void (cilk_func)(__cilkrts_stack_frame *);
 
-typedef void (cilk_enter_begin)(__cilkrts_stack_frame *, void *);
-typedef void (cilk_enter_helper_begin)(__cilkrts_stack_frame *, void *);
+typedef void (cilk_enter_begin)(__cilkrts_stack_frame *, void *, void *);
+typedef void (cilk_enter_helper_begin)(__cilkrts_stack_frame *, void *, void *);
 typedef void (cilk_enter_end)(__cilkrts_stack_frame *, void *);
 typedef void (cilk_detach_begin)(__cilkrts_stack_frame *);
 typedef void (cilk_detach_end)();
@@ -104,8 +104,8 @@ typedef void (cilk_sync_end)(__cilkrts_stack_frame *);
 typedef void (cilk_leave_begin)(__cilkrts_stack_frame *);
 typedef void (cilk_leave_end)();
 
-typedef void (cilk_tool_c_function_enter)(void *rip);
-typedef void (cilk_tool_c_function_leave)(void *rip);
+typedef void (cilk_tool_c_function_enter)(void *, void *);
+typedef void (cilk_tool_c_function_leave)(void *);
 
 } // namespace
 
@@ -944,15 +944,15 @@ static Function *Get__cilkrts_enter_frame_fast_1(CodeGenFunction &CGF) {
 /// It is equivalent to the following C code
 ///
 /// void __cilk_parent_prologue(__cilkrts_stack_frame *sf,
-///                             void *pc, void *sp) {
-///   cilk_enter_begin(sf, pc);
+///                             void *this_fn, void *call_site, void *sp) {
+///   cilk_enter_begin(sf, this_fn, call_site);
 ///   __cilkrts_enter_frame_1(sf);
 ///   cilk_enter_end(sf, sp);
 /// }
 static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
   Function *Fn = 0;
 
-  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *);
+  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *, void *);
   if (GetOrCreateFunction<cilk_func_2>("__cilk_parent_prologue", CGF, Fn))
     return Fn;
 
@@ -961,14 +961,15 @@ static Function *GetCilkParentPrologue(CodeGenFunction &CGF) {
 
   Function::arg_iterator args = Fn->arg_begin();
   Value *SF = args;
-  Value *PC = ++args;
+  Value *this_fn = ++args;
+  Value *call_site = ++args;
   Value *SP = ++args;
 
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
 
   // cilk_enter_begin
-  B.CreateCall2(CILK_OK_FUNC(enter_begin, CGF), SF, PC);
+  B.CreateCall3(CILK_OK_FUNC(enter_begin, CGF), SF, this_fn, call_site);
 
   // __Cilkrts_enter_frame_1(sf)
   B.CreateCall(CILKRTS_FUNC(enter_frame_1, CGF), SF);
@@ -1053,8 +1054,8 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
 /// It is equivalent to the following C code
 ///
 /// void __cilk_helper_prologue(__cilkrts_stack_frame *sf,
-///                             void *pc, void *sp) {
-///   cilk_enter_helper_begin(sf, pc);
+///                             void *this_fn, void *call_site, void *sp) {
+///   cilk_enter_helper_begin(sf, this_fn, call_site);
 ///   __cilkrts_enter_frame_fast_1(sf);
 ///   cilk_enter_end(sf, sp);
 ///   cilk_detach_begin(sf);
@@ -1064,7 +1065,7 @@ static Function *GetCilkParentEpilogue(CodeGenFunction &CGF) {
 static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
   Function *Fn = 0;
 
-  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *);
+  typedef void (cilk_func_2)(__cilkrts_stack_frame *, void *, void *, void *);
   if (GetOrCreateFunction<cilk_func_2>("__cilk_helper_prologue", CGF, Fn))
     return Fn;
 
@@ -1073,14 +1074,15 @@ static llvm::Function *GetCilkHelperPrologue(CodeGenFunction &CGF) {
 
   Function::arg_iterator args = Fn->arg_begin();
   Value *SF = args;
-  Value *PC = ++args;
+  Value *this_fn = ++args;
+  Value *call_site = ++args;
   Value *SP = ++args;
 
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
   CGBuilderTy B(Entry);
 
   // cilk_enter_helper_begin(sf, pc)
-  B.CreateCall2(CILK_OK_FUNC(enter_helper_begin, CGF), SF, PC);
+  B.CreateCall3(CILK_OK_FUNC(enter_helper_begin, CGF), SF, this_fn, call_site);
 
   // __cilkrts_enter_frame_fast_1(sf);
   B.CreateCall(CILKRTS_FUNC(enter_frame_fast_1, CGF), SF);
@@ -1438,11 +1440,12 @@ public:
 struct CilkToolCFunctionEntryCleanup : public EHScopeStack::Cleanup {
 public:
   void Emit(CodeGenFunction &CGF, Flags F) {
-    llvm::Value *PC = CGF.Builder.CreateCall(
+    llvm::Value *call_site = CGF.Builder.CreateCall(
                             CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
                             CGF.Builder.getInt32(0));
     // Generate call to cilk_tool_c_function_leave
-    CGF.Builder.CreateCall(CILK_OK_FUNC(tool_c_function_leave, CGF), PC);
+    CGF.Builder.CreateCall(CILK_OK_FUNC(tool_c_function_leave, CGF),
+                           call_site);
   }
 };
 
@@ -1459,13 +1462,17 @@ void CGCilkPlusRuntime::EmitCilkParentStackFrame(CodeGenFunction &CGF) {
   {
     assert(CGF.AllocaInsertPt && "not initializied");
     CGBuilderTy Builder(CGF.AllocaInsertPt);
-    llvm::Value *PC
+    llvm::Type *Int8PtrTy = Builder.getInt8PtrTy();
+    llvm::Value *this_fn
+        = llvm::ConstantExpr::getBitCast(CGF.CurFn, Int8PtrTy);
+
+    llvm::Value *call_site
         = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
                              Builder.getInt32(0));
     llvm::Value *SP
         = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave));
 
-    Builder.CreateCall3(GetCilkParentPrologue(CGF), SF, PC, SP);
+    Builder.CreateCall4(GetCilkParentPrologue(CGF), SF, this_fn, call_site, SP);
   }
 
   // Push cleanups associated to this stack frame initialization.
@@ -1507,14 +1514,18 @@ void CGCilkPlusRuntime::EmitCilkHelperPrologue(CodeGenFunction &CGF) {
     assert(CGF.AllocaInsertPt && "not initializied");
     CGBuilderTy Builder(CGF.AllocaInsertPt);
 
-    Value *PC
+    llvm::Type *Int8PtrTy = Builder.getInt8PtrTy();
+    Value *this_fn
+        = llvm::ConstantExpr::getBitCast(CGF.CurFn, Int8PtrTy);
+
+    Value *call_site
         = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
                              Builder.getInt32(0));
     Value *SP
         = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::stacksave));
 
     // Initialize the stack frame and detach
-    CGF.Builder.CreateCall3(GetCilkHelperPrologue(CGF), SF, PC, SP);
+    CGF.Builder.CreateCall4(GetCilkHelperPrologue(CGF), SF, this_fn, call_site, SP);
   }
 }
 
@@ -1526,12 +1537,17 @@ void CGCilkPlusRuntime::EmitCilkToolCFunctionPrologue(CodeGenFunction &CGF) {
   // Get the code point where normally alloca is called
   assert(CGF.AllocaInsertPt && "not initializied");
   CGBuilderTy Builder(CGF.AllocaInsertPt);
-  llvm::Value *PC
+  llvm::Type *Int8PtrTy = Builder.getInt8PtrTy();
+  llvm::Value *this_fn
+      = llvm::ConstantExpr::getBitCast(CGF.CurFn, Int8PtrTy);
+
+  llvm::Value *call_site
         = Builder.CreateCall(CGF.CGM.getIntrinsic(Intrinsic::returnaddress),
                              Builder.getInt32(0));
 
   // Generate call to cilk_tool_c_function_enter
-  Builder.CreateCall(CILK_OK_FUNC(tool_c_function_enter, CGF), PC);
+  Builder.CreateCall2(CILK_OK_FUNC(tool_c_function_enter, CGF),
+                      this_fn, call_site);
 
   // Push cleanups associated to this function entry call (i.e., the 
   // correpsonding function exit call)
